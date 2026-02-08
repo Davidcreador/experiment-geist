@@ -47,6 +47,12 @@ body {
   backdrop-filter: blur(4px);
 }
 
+.word-control:not(.collapsed) {
+  max-height: calc(100dvh - clamp(24px, 4vw, 48px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .word-control.collapsed {
   width: auto;
   max-width: min(220px, calc(100vw - 24px));
