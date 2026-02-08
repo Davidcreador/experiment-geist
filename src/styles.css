@@ -25,6 +25,14 @@ body {
   height: 100%;
 }
 
+.hero-fallback {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(120% 90% at 50% 50%, rgba(255, 255, 255, 0.04), transparent 45%),
+    #000;
+}
+
 .word-control {
   position: absolute;
   top: clamp(12px, 2vw, 24px);
@@ -39,6 +47,32 @@ body {
   backdrop-filter: blur(4px);
 }
 
+.word-control.collapsed {
+  width: auto;
+  max-width: min(220px, calc(100vw - 24px));
+}
+
+.word-control .panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.word-control .panel-header strong {
+  margin: 0;
+  font-family: "Geist Pixel Line", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.86);
+  font-weight: 400;
+}
+
+.word-control .panel-toggle-btn {
+  padding: 6px 10px;
+}
+
 .word-control label {
   margin: 0;
   font-family: "Geist Pixel Line", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
@@ -46,6 +80,57 @@ body {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: rgba(255, 255, 255, 0.86);
+}
+
+.word-control .control-section,
+.word-control .font-section {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.word-control .control-section > summary,
+.word-control .font-section > summary {
+  position: relative;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  padding: 7px 10px;
+  font-family: "Geist Pixel Line", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.word-control .control-section > summary::-webkit-details-marker,
+.word-control .font-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.word-control .control-section > summary::after,
+.word-control .font-section > summary::after {
+  content: "+";
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.word-control .control-section[open] > summary::after,
+.word-control .font-section[open] > summary::after {
+  content: "-";
+}
+
+.word-control .control-section > .section-body,
+.word-control .font-section > .font-control {
+  display: grid;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.word-control .font-section + .font-section {
+  margin-top: 8px;
 }
 
 .word-control .row {
@@ -106,12 +191,15 @@ body {
   color: #fff;
 }
 
+.word-control .font-control,
+.word-control .paper-control,
 .word-control .motion-control {
   display: grid;
   gap: 8px;
   padding-top: 2px;
 }
 
+.word-control .font-control p,
 .word-control .motion-control p {
   margin: 0;
   font-family: "Geist Pixel Line", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
@@ -121,9 +209,23 @@ body {
   color: rgba(255, 255, 255, 0.86);
 }
 
+.word-control .font-family-field {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.word-control .font-family-field span {
+  font-family: "Geist Pixel Line", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.66);
+}
+
 .word-control .preset-toggle {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(82px, 1fr));
   gap: 8px;
 }
 
@@ -175,6 +277,39 @@ body {
 }
 
 .word-control .slider-grid input[type="range"] {
+  width: 100%;
+  margin: 0;
+  accent-color: #86d4ff;
+}
+
+.word-control .paper-intensity {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.word-control .paper-intensity span {
+  font-family: "Geist Pixel Line", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.66);
+}
+
+.word-control .paper-intensity b {
+  font-family: "Geist Pixel Line", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.85);
+  font-weight: 400;
+}
+
+.word-control .paper-intensity input[type="range"] {
   width: 100%;
   margin: 0;
   accent-color: #86d4ff;
@@ -241,7 +376,10 @@ body {
   top: clamp(12px, 2vw, 24px);
   right: clamp(12px, 2vw, 24px);
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
+  max-width: min(76vw, 760px);
   z-index: 2;
 }
 
@@ -358,12 +496,13 @@ body {
     left: clamp(12px, 3vw, 18px);
     right: clamp(12px, 3vw, 18px);
     top: calc(min(52vh, 420px) + 20px);
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 6px;
+    max-width: none;
   }
 
   .mesh-hero .mode-switch button {
-    flex: 1 1 0;
     padding: 8px 6px;
     font-size: 10px;
   }

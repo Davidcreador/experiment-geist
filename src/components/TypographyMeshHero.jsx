@@ -1,9 +1,5 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import * as THREE from "three";
-import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
-import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
-import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
-import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 import pixelLineFontUrl from "../assets/fonts/GeistPixel-Line.woff2?url";
 import pixelSquareFontUrl from "../assets/fonts/GeistPixel-Square.woff2?url";
 
@@ -13,6 +9,9 @@ const INTERACTION_MODES = [
   { id: "fluid", label: "Fluid Drift" },
   { id: "nebula", label: "Nebula Curl" },
   { id: "tide", label: "Tidal Shear" },
+  { id: "vortex", label: "Vortex Lens" },
+  { id: "ripple", label: "Ripple Pulse" },
+  { id: "magnet", label: "Magnetic Lattice" },
 ];
 const INTERACTION_MODE_IDS = INTERACTION_MODES.map((mode) => mode.id);
 const COLOR_MODE_IDS = ["white", "colorful"];
@@ -52,6 +51,216 @@ const FILM_GRAIN_SHADER = {
       float vignette = smoothstep(1.2, 0.24, length(center));
       color *= mix(1.0, vignette, uVignette);
 
+      gl_FragColor = vec4(color, base.a);
+    }
+  `,
+};
+
+const PAPER_MESH_SHADER = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uTime: { value: 0 },
+    uIntensity: { value: 0.34 },
+    uPalette: { value: 0 },
+    uEffect: { value: 0 },
+    uEffectAmount: { value: 0.58 },
+    uSpeed: { value: 1 },
+    uDotShape: { value: 0 },
+    uDotDensity: { value: 0.58 },
+    uGrainShape: { value: 0 },
+    uPointer: { value: new THREE.Vector2(0.5, 0.5) },
+    uEnergy: { value: 0 },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float uTime;
+    uniform float uIntensity;
+    uniform float uPalette;
+    uniform float uEffect;
+    uniform float uEffectAmount;
+    uniform float uSpeed;
+    uniform float uDotShape;
+    uniform float uDotDensity;
+    uniform float uGrainShape;
+    uniform vec2 uPointer;
+    uniform float uEnergy;
+
+    varying vec2 vUv;
+
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+    }
+
+    float noise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      float a = hash(i);
+      float b = hash(i + vec2(1.0, 0.0));
+      float c = hash(i + vec2(0.0, 1.0));
+      float d = hash(i + vec2(1.0, 1.0));
+      vec2 u = f * f * (3.0 - 2.0 * f);
+      return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    }
+
+    float fbm(vec2 p) {
+      float v = 0.0;
+      float a = 0.5;
+      for (int i = 0; i < 4; i++) {
+        v += a * noise(p);
+        p = p * 2.02 + vec2(17.13, 9.41);
+        a *= 0.52;
+      }
+      return v;
+    }
+
+    vec3 pickPalette(float t, float palette) {
+      if (palette < 0.5) {
+        vec3 a = vec3(0.17, 0.67, 0.98);
+        vec3 b = vec3(0.99, 0.47, 0.89);
+        vec3 c = vec3(0.99, 0.88, 0.41);
+        return mix(mix(a, b, smoothstep(0.08, 0.66, t)), c, smoothstep(0.52, 0.95, t));
+      }
+      if (palette < 1.5) {
+        vec3 a = vec3(0.22, 0.87, 0.82);
+        vec3 b = vec3(0.30, 0.49, 0.98);
+        vec3 c = vec3(0.78, 0.61, 0.99);
+        return mix(mix(a, b, smoothstep(0.12, 0.7, t)), c, smoothstep(0.56, 0.96, t));
+      }
+      float v = mix(0.4, 0.98, t);
+      return vec3(v);
+    }
+
+    mat2 rot(float a) {
+      float c = cos(a);
+      float s = sin(a);
+      return mat2(c, -s, s, c);
+    }
+
+    float dotShapeMask(vec2 p, float shape) {
+      vec2 q = p;
+      if (shape < 0.5) {
+        float d = length(q);
+        return 1.0 - smoothstep(0.36, 0.41, d);
+      }
+      if (shape < 1.5) {
+        q = abs(q);
+        float d = q.x + q.y;
+        return 1.0 - smoothstep(0.43, 0.48, d);
+      }
+      if (shape < 2.5) {
+        q = abs(q);
+        float d = max(q.x, q.y);
+        return 1.0 - smoothstep(0.36, 0.41, d);
+      }
+      q.y += 0.12;
+      float d = max(abs(q.x) * 1.15 + q.y * 0.9, -q.y);
+      return 1.0 - smoothstep(0.34, 0.4, d);
+    }
+
+    vec2 grainWarp(vec2 uv, float shape, float t, float amt) {
+      vec2 p = uv;
+      if (shape < 0.5) {
+        vec2 c = abs(p);
+        p += sign(uv) * pow(c, vec2(1.9)) * (0.35 + amt * 0.55);
+      } else if (shape < 1.5) {
+        p += vec2(
+          sin(p.y * (3.5 + amt * 2.0) + t * 0.72),
+          cos(p.x * (3.2 + amt * 2.2) - t * 0.63)
+        ) * (0.24 + 0.34 * amt);
+      } else if (shape < 2.5) {
+        vec2 grid = floor((p + 1.0) * (3.0 + amt * 4.0));
+        float j = hash(grid + vec2(1.9, -2.4));
+        p = fract((p + 1.0) * (3.0 + amt * 4.0)) - 0.5;
+        if (j > 0.5) {
+          p.x *= -1.0;
+        }
+        p = p * rot(t * 0.15 + j * 3.1415);
+      } else if (shape < 3.5) {
+        vec2 d = p - vec2(0.0, 0.0);
+        float l = length(d) + 0.0001;
+        p += normalize(d) * (0.3 + 0.55 * amt) * exp(-l * 2.6) * sin(t * 0.7 + l * 9.0);
+      } else if (shape < 4.5) {
+        float r = length(p);
+        p += vec2(
+          sin(r * (10.0 + amt * 14.0) - t * 0.62),
+          cos(r * (8.4 + amt * 12.0) + t * 0.55)
+        ) * (0.12 + 0.3 * amt);
+      } else if (shape < 5.5) {
+        vec2 d = p;
+        float l = length(d) + 0.0001;
+        p += normalize(d) * (0.25 + 0.58 * amt) * exp(-l * 1.9);
+      } else {
+        float r = length(p);
+        p = normalize(p + vec2(0.0001, -0.0001)) * pow(r, 1.35 + amt * 0.9);
+      }
+      return p;
+    }
+
+    void main() {
+      vec4 base = texture2D(tDiffuse, vUv);
+      vec2 uv = vUv * 2.0 - 1.0;
+      vec2 pointer = uPointer * 2.0 - 1.0;
+      vec2 toPointer = uv - pointer;
+      float pointerDist = length(toPointer);
+      float pointerFocus = smoothstep(1.1, 0.0, pointerDist);
+      float time = uTime * (0.66 + 0.74 * uSpeed);
+
+      vec2 flow = uv * 1.7 + vec2(time * 0.075, -time * 0.062);
+      flow += normalize(toPointer + vec2(0.001, -0.001)) * pointerFocus * (0.18 + uEnergy * 0.12);
+
+      vec2 effectUv = flow;
+      if (uEffect < 0.5) {
+        vec2 warp = vec2(
+          fbm(flow * 1.7 + vec2(2.1, -1.6)) - 0.5,
+          fbm(flow * 1.5 + vec2(-3.4, 4.2)) - 0.5
+        );
+        effectUv += warp * (0.65 * uEffectAmount);
+      } else if (uEffect < 1.5) {
+        float angle = (0.22 + uEffectAmount * 0.86) * exp(-pointerDist * 1.7) * sin(time * 0.32);
+        float c = cos(angle);
+        float s = sin(angle);
+        vec2 centered = uv - pointer;
+        effectUv = vec2(centered.x * c - centered.y * s, centered.x * s + centered.y * c) + pointer;
+      } else if (uEffect < 2.5) {
+        effectUv += vec2(
+          sin(uv.y * (7.0 + uEffectAmount * 9.0) + time * 0.74),
+          cos(uv.x * (7.6 + uEffectAmount * 8.0) - time * 0.69)
+        ) * (0.14 + 0.44 * uEffectAmount);
+      } else {
+        float ray = atan(uv.y - pointer.y, uv.x - pointer.x);
+        float beam = sin(ray * (6.0 + 24.0 * uEffectAmount) - time * 0.7);
+        float burst = exp(-pointerDist * (1.3 + uEffectAmount * 2.2));
+        effectUv += normalize(toPointer + vec2(0.001, -0.001)) * beam * burst * (0.36 + uEffectAmount * 0.64);
+      }
+
+      float nA = fbm(effectUv + vec2(fbm(effectUv * 1.21), fbm(effectUv * 1.37)));
+      float nB = fbm(effectUv * 1.9 - vec2(3.1, -1.7));
+      float ridge = abs(sin((nA + nB * 0.7 + uv.x * 0.35 - uv.y * 0.28 + time * 0.09) * 6.2831));
+
+      float tA = clamp(nA * 0.72 + ridge * 0.48, 0.0, 1.0);
+      float tB = fract(tA + 0.19 + 0.11 * sin(time * 0.17 + uv.x * 2.3));
+      vec3 tintA = pickPalette(tA, uPalette);
+      vec3 tintB = pickPalette(tB, uPalette);
+      vec3 tint = mix(tintA, tintB, 0.5 + 0.5 * sin(time * 0.13 + uv.y * 1.9));
+
+      float grain = (hash(vUv * vec2(1600.0, 900.0) + time * 63.7) - 0.5) * 0.085;
+      float pulse = 0.88 + 0.14 * sin(time * 0.41);
+      float intensity =
+        clamp(uIntensity, 0.0, 1.0) *
+        (0.8 + 0.35 * uEffectAmount) *
+        (0.74 + 0.26 * pointerFocus) *
+        (0.84 + 0.3 * uEnergy) *
+        pulse;
+
+      vec3 overlay = tint * 0.4 + vec3(grain);
+      vec3 color = mix(base.rgb, clamp(base.rgb + overlay, 0.0, 1.0), intensity);
       gl_FragColor = vec4(color, base.a);
     }
   `,
@@ -105,10 +314,177 @@ function normalizeWord(value) {
   return next.length > 0 ? next : "GEIST";
 }
 
+function normalizePaperFx(paperFx) {
+  const source = paperFx && typeof paperFx === "object" ? paperFx : {};
+  const rawIntensity =
+    source.intensity === undefined || source.intensity === null
+      ? 0.34
+      : Number(source.intensity);
+  const rawAmount =
+    source.amount === undefined || source.amount === null ? 0.58 : Number(source.amount);
+  const rawSpeed =
+    source.speed === undefined || source.speed === null ? 1 : Number(source.speed);
+  const rawDotDensity =
+    source.dotDensity === undefined || source.dotDensity === null
+      ? 0.58
+      : Number(source.dotDensity);
+  return {
+    enabled: source.enabled !== false,
+    intensity: Math.max(0, Math.min(1, Number.isFinite(rawIntensity) ? rawIntensity : 0.34)),
+    amount: Math.max(0, Math.min(1, Number.isFinite(rawAmount) ? rawAmount : 0.58)),
+    speed: Math.max(0.2, Math.min(2.2, Number.isFinite(rawSpeed) ? rawSpeed : 1)),
+    effect:
+      source.effect === "swirl" ||
+      source.effect === "waves" ||
+      source.effect === "rays" ||
+      source.effect === "dotgrid" ||
+      source.effect === "grain"
+        ? source.effect
+        : "warp",
+    dotShape:
+      source.dotShape === "diamond" ||
+      source.dotShape === "square" ||
+      source.dotShape === "triangle"
+        ? source.dotShape
+        : "circle",
+    dotDensity: Math.max(
+      0.1,
+      Math.min(1, Number.isFinite(rawDotDensity) ? rawDotDensity : 0.58),
+    ),
+    grainShape:
+      source.grainShape === "wave" ||
+      source.grainShape === "dots" ||
+      source.grainShape === "truchet" ||
+      source.grainShape === "ripple" ||
+      source.grainShape === "blob" ||
+      source.grainShape === "sphere"
+        ? source.grainShape
+        : "corners",
+    palette:
+      source.palette === "aurora" || source.palette === "mono"
+        ? source.palette
+        : "prism",
+  };
+}
+
+function normalizeBackgroundMeshFx(backgroundMeshFx) {
+  const source =
+    backgroundMeshFx && typeof backgroundMeshFx === "object" ? backgroundMeshFx : {};
+  const rawAmount =
+    source.amount === undefined || source.amount === null ? 0.58 : Number(source.amount);
+  const rawDotDensity =
+    source.dotDensity === undefined || source.dotDensity === null
+      ? 0.58
+      : Number(source.dotDensity);
+  return {
+    style:
+      source.style === "dotgrid" || source.style === "grain"
+        ? source.style
+        : "letters",
+    amount: Math.max(0, Math.min(1, Number.isFinite(rawAmount) ? rawAmount : 0.58)),
+    dotShape:
+      source.dotShape === "diamond" ||
+      source.dotShape === "square" ||
+      source.dotShape === "triangle"
+        ? source.dotShape
+        : "circle",
+    dotDensity: Math.max(
+      0.1,
+      Math.min(1, Number.isFinite(rawDotDensity) ? rawDotDensity : 0.58),
+    ),
+    grainShape:
+      source.grainShape === "wave" ||
+      source.grainShape === "dots" ||
+      source.grainShape === "truchet" ||
+      source.grainShape === "ripple" ||
+      source.grainShape === "blob" ||
+      source.grainShape === "sphere"
+        ? source.grainShape
+        : "corners",
+  };
+}
+
+function normalizeModeStrengths(modeStrengths) {
+  const source = modeStrengths && typeof modeStrengths === "object" ? modeStrengths : {};
+  const normalized = {};
+  for (const modeId of INTERACTION_MODE_IDS) {
+    const raw = Number(source[modeId]);
+    normalized[modeId] = Number.isFinite(raw) ? Math.max(0.4, Math.min(1.8, raw)) : 1;
+  }
+  return normalized;
+}
+
+function getPaperPaletteIndex(palette) {
+  if (palette === "aurora") return 1;
+  if (palette === "mono") return 2;
+  return 0;
+}
+
+function getPaperEffectIndex(effect) {
+  if (effect === "swirl") return 1;
+  if (effect === "waves") return 2;
+  if (effect === "rays") return 3;
+  if (effect === "dotgrid") return 4;
+  if (effect === "grain") return 5;
+  return 0;
+}
+
+function getPaperDotShapeIndex(shape) {
+  if (shape === "diamond") return 1;
+  if (shape === "square") return 2;
+  if (shape === "triangle") return 3;
+  return 0;
+}
+
+function getPaperGrainShapeIndex(shape) {
+  if (shape === "wave") return 1;
+  if (shape === "dots") return 2;
+  if (shape === "truchet") return 3;
+  if (shape === "ripple") return 4;
+  if (shape === "blob") return 5;
+  if (shape === "sphere") return 6;
+  return 0;
+}
+
+function normalizeFontSet(fontSet) {
+  const fallback = {
+    line: '"Geist Pixel Line", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace',
+    solid: '"Geist Pixel Square", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace',
+    background:
+      '"Geist Pixel Line", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace',
+  };
+  if (!fontSet || typeof fontSet !== "object") return fallback;
+  const line =
+    typeof fontSet.line === "string" && fontSet.line.trim().length > 0
+      ? fontSet.line.trim()
+      : fallback.line;
+  const solid =
+    typeof fontSet.solid === "string" && fontSet.solid.trim().length > 0
+      ? fontSet.solid.trim()
+      : fallback.solid;
+  const background =
+    typeof fontSet.background === "string" && fontSet.background.trim().length > 0
+      ? fontSet.background.trim()
+      : fallback.background;
+  return { line, solid, background };
+}
+
 async function loadCanvasFont(name, url) {
   const font = new FontFace(name, `url(${url})`);
   await font.load();
   document.fonts.add(font);
+}
+
+async function loadPostprocessingModules() {
+  const [{ EffectComposer }, { RenderPass }, { UnrealBloomPass }, { ShaderPass }] =
+    await Promise.all([
+      import("three/examples/jsm/postprocessing/EffectComposer.js"),
+      import("three/examples/jsm/postprocessing/RenderPass.js"),
+      import("three/examples/jsm/postprocessing/UnrealBloomPass.js"),
+      import("three/examples/jsm/postprocessing/ShaderPass.js"),
+    ]);
+
+  return { EffectComposer, RenderPass, UnrealBloomPass, ShaderPass };
 }
 
 function makeGlyphAtlas(glyphs, fontFamily, fontSize) {
@@ -122,7 +498,7 @@ function makeGlyphAtlas(glyphs, fontFamily, fontSize) {
   context.fillStyle = "#fff";
   context.textAlign = "center";
   context.textBaseline = "middle";
-  context.font = `${fontSize}px "${fontFamily}"`;
+  context.font = `${fontSize}px ${fontFamily}`;
 
   for (let i = 0; i < glyphs.length; i += 1) {
     context.fillText(glyphs[i], i * cell + cell * 0.5, cell * 0.52);
@@ -136,23 +512,121 @@ function makeGlyphAtlas(glyphs, fontFamily, fontSize) {
   return texture;
 }
 
-export default function TypographyMeshHero({
+function areMotionSettingsEqual(a, b) {
+  return (
+    (a?.flow ?? 1) === (b?.flow ?? 1) &&
+    (a?.drag ?? 1) === (b?.drag ?? 1) &&
+    (a?.camera ?? 1) === (b?.camera ?? 1) &&
+    (a?.settle ?? 1) === (b?.settle ?? 1)
+  );
+}
+
+function areFontSetEqual(a, b) {
+  return (
+    (a?.line ?? "") === (b?.line ?? "") &&
+    (a?.solid ?? "") === (b?.solid ?? "") &&
+    (a?.background ?? "") === (b?.background ?? "")
+  );
+}
+
+function arePaperFxEqual(a, b) {
+  return (
+    (a?.enabled ?? true) === (b?.enabled ?? true) &&
+    (a?.palette ?? "prism") === (b?.palette ?? "prism") &&
+    (a?.effect ?? "warp") === (b?.effect ?? "warp") &&
+    (a?.dotShape ?? "circle") === (b?.dotShape ?? "circle") &&
+    (a?.grainShape ?? "corners") === (b?.grainShape ?? "corners") &&
+    Math.abs((a?.intensity ?? 0) - (b?.intensity ?? 0)) < 0.0001 &&
+    Math.abs((a?.amount ?? 0.58) - (b?.amount ?? 0.58)) < 0.0001 &&
+    Math.abs((a?.dotDensity ?? 0.58) - (b?.dotDensity ?? 0.58)) < 0.0001 &&
+    Math.abs((a?.speed ?? 1) - (b?.speed ?? 1)) < 0.0001
+  );
+}
+
+function areBackgroundMeshFxEqual(a, b) {
+  return (
+    (a?.style ?? "letters") === (b?.style ?? "letters") &&
+    (a?.dotShape ?? "circle") === (b?.dotShape ?? "circle") &&
+    (a?.grainShape ?? "corners") === (b?.grainShape ?? "corners") &&
+    Math.abs((a?.amount ?? 0.58) - (b?.amount ?? 0.58)) < 0.0001 &&
+    Math.abs((a?.dotDensity ?? 0.58) - (b?.dotDensity ?? 0.58)) < 0.0001
+  );
+}
+
+function areModeStrengthsEqual(a, b) {
+  return INTERACTION_MODE_IDS.every(
+    (modeId) => Math.abs((a?.[modeId] ?? 1) - (b?.[modeId] ?? 1)) < 0.0001,
+  );
+}
+
+function areHeroPropsEqual(prev, next) {
+  return (
+    prev.word === next.word &&
+    prev.fontLabel === next.fontLabel &&
+    prev.interactionMode === next.interactionMode &&
+    prev.onInteractionModeChange === next.onInteractionModeChange &&
+    prev.colorMode === next.colorMode &&
+    prev.onColorModeChange === next.onColorModeChange &&
+    prev.motionPreset === next.motionPreset &&
+    areMotionSettingsEqual(prev.motionSettings, next.motionSettings) &&
+    areModeStrengthsEqual(prev.modeStrengths, next.modeStrengths) &&
+    areFontSetEqual(prev.fontSet, next.fontSet) &&
+    arePaperFxEqual(prev.paperFx, next.paperFx) &&
+    areBackgroundMeshFxEqual(prev.backgroundMeshFx, next.backgroundMeshFx)
+  );
+}
+
+function TypographyMeshHero({
   word = "GEIST",
+  fontSet = null,
+  fontLabel = "Geist Pixel",
   interactionMode = "fluid",
   onInteractionModeChange,
   colorMode = "white",
   onColorModeChange,
   motionSettings = { flow: 1, drag: 1, camera: 1, settle: 1 },
   motionPreset = "cinematic",
+  modeStrengths = {
+    fluid: 1,
+    nebula: 1,
+    tide: 1,
+    vortex: 1,
+    ripple: 1,
+    magnet: 1,
+  },
+  paperFx = {
+    enabled: true,
+    intensity: 0.34,
+    palette: "prism",
+    effect: "warp",
+    amount: 0.58,
+    speed: 1,
+    dotShape: "circle",
+    dotDensity: 0.58,
+    grainShape: "corners",
+  },
+  backgroundMeshFx = {
+    style: "letters",
+    amount: 0.58,
+    dotShape: "circle",
+    dotDensity: 0.58,
+    grainShape: "corners",
+  },
 }) {
   const canvasRef = useRef(null);
   const perfRef = useRef(null);
   const retargetWordRef = useRef(null);
+  const applyFontSetRef = useRef(null);
+  const applyBackgroundMeshFxRef = useRef(null);
 
   const interactionModeRef = useRef(getInteractionModeIndex(interactionMode));
   const colorModeRef = useRef(getColorModeIndex(colorMode));
   const motionRef = useRef(motionSettings);
+  const modeStrengthsRef = useRef(normalizeModeStrengths(modeStrengths));
   const wordRef = useRef(normalizeWord(word));
+  const fontSetRef = useRef(normalizeFontSet(fontSet));
+  const paperFxRef = useRef(normalizePaperFx(paperFx));
+  const backgroundMeshFxRef = useRef(normalizeBackgroundMeshFx(backgroundMeshFx));
 
   useEffect(() => {
     interactionModeRef.current = getInteractionModeIndex(interactionMode);
@@ -172,6 +646,10 @@ export default function TypographyMeshHero({
   }, [motionSettings]);
 
   useEffect(() => {
+    modeStrengthsRef.current = normalizeModeStrengths(modeStrengths);
+  }, [modeStrengths]);
+
+  useEffect(() => {
     const nextWord = normalizeWord(word);
     wordRef.current = nextWord;
     if (retargetWordRef.current) {
@@ -180,9 +658,31 @@ export default function TypographyMeshHero({
   }, [word]);
 
   useEffect(() => {
+    const nextSet = normalizeFontSet(fontSet);
+    fontSetRef.current = nextSet;
+    if (applyFontSetRef.current) {
+      applyFontSetRef.current(nextSet);
+    }
+  }, [fontSet]);
+
+  useEffect(() => {
+    paperFxRef.current = normalizePaperFx(paperFx);
+  }, [paperFx]);
+
+  useEffect(() => {
+    const nextFx = normalizeBackgroundMeshFx(backgroundMeshFx);
+    backgroundMeshFxRef.current = nextFx;
+    if (applyBackgroundMeshFxRef.current) {
+      applyBackgroundMeshFxRef.current(nextFx);
+    }
+  }, [backgroundMeshFx]);
+
+  useEffect(() => {
     if (!canvasRef.current) return undefined;
 
     const fgGlyphs = FOREGROUND_GLYPHS;
+    let activeFontSet = fontSetRef.current;
+    let activeBackgroundMeshStyle = backgroundMeshFxRef.current.style;
 
     const timeline = {
       meshEnd: 2.6,
@@ -220,13 +720,10 @@ export default function TypographyMeshHero({
     const camera = new THREE.PerspectiveCamera(38, 1, 1, 8000);
     scene.add(camera);
 
-    const composer = new EffectComposer(renderer);
-    const renderPass = new RenderPass(scene, camera);
-    const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.24, 0.45, 0.92);
-    const filmPass = new ShaderPass(FILM_GRAIN_SHADER);
-    composer.addPass(renderPass);
-    composer.addPass(bloomPass);
-    composer.addPass(filmPass);
+    let composer = null;
+    let bloomPass = null;
+    let filmPass = null;
+    let paperPass = null;
 
     const clock = new THREE.Clock();
 
@@ -253,14 +750,19 @@ export default function TypographyMeshHero({
     let foregroundMaterial = null;
     let foregroundAtlas = null;
     let foregroundSolidAtlas = null;
+    let foregroundAtlasKey = "";
+    let foregroundSolidAtlasKey = "";
     let foregroundOffsetAttribute = null;
     let foregroundDepthAttribute = null;
     let foregroundGlyphAttribute = null;
 
     let backgroundAtlas = null;
+    let backgroundAtlasKey = "";
+    let backgroundFallbackTexture = null;
     let backgroundLayers = [];
 
     let animationFrame = 0;
+    let resizeFrame = 0;
     let disposed = false;
 
     let pointerTargetX = 0;
@@ -278,10 +780,15 @@ export default function TypographyMeshHero({
     let ambientDriftY = 0;
 
     function getRenderPixelRatio() {
-      return Math.min(window.devicePixelRatio || 1, 2) * (0.72 + 0.28 * qualityScale);
+      const styleScale = activeBackgroundMeshStyle === "letters" ? 1 : 0.88;
+      return (
+        Math.min(window.devicePixelRatio || 1, 2) *
+        (0.72 + 0.28 * qualityScale) *
+        styleScale
+      );
     }
 
-    function disposeForeground() {
+    function disposeForeground(disposeAtlases = false) {
       if (foregroundMesh) {
         scene.remove(foregroundMesh);
         foregroundMesh.geometry.dispose();
@@ -289,33 +796,73 @@ export default function TypographyMeshHero({
       if (foregroundMaterial) {
         foregroundMaterial.dispose();
       }
-      if (foregroundAtlas) {
+      if (disposeAtlases && foregroundAtlas) {
         foregroundAtlas.dispose();
+        foregroundAtlasKey = "";
       }
-      if (foregroundSolidAtlas) {
+      if (disposeAtlases && foregroundSolidAtlas) {
         foregroundSolidAtlas.dispose();
+        foregroundSolidAtlasKey = "";
       }
 
       foregroundMesh = null;
       foregroundMaterial = null;
-      foregroundAtlas = null;
-      foregroundSolidAtlas = null;
+      if (disposeAtlases) {
+        foregroundAtlas = null;
+        foregroundSolidAtlas = null;
+      }
       foregroundOffsetAttribute = null;
       foregroundDepthAttribute = null;
       foregroundGlyphAttribute = null;
     }
 
-    function disposeBackgroundLayers() {
+    function disposeBackgroundLayers(disposeAtlas = false) {
       for (const layer of backgroundLayers) {
         scene.remove(layer.mesh);
         layer.mesh.geometry.dispose();
         layer.material.dispose();
       }
       backgroundLayers = [];
+      if (disposeAtlas && backgroundAtlas) {
+        backgroundAtlas.dispose();
+        backgroundAtlasKey = "";
+        backgroundAtlas = null;
+      }
+      if (disposeAtlas && backgroundFallbackTexture) {
+        backgroundFallbackTexture.dispose();
+        backgroundFallbackTexture = null;
+      }
+    }
+
+    function getBackgroundSamplerTexture(style) {
+      if (style === "letters") {
+        const nextBackgroundAtlasKey = `${BACKGROUND_GLYPHS.join("")}|${activeFontSet.background}|104`;
+        if (!backgroundAtlas || backgroundAtlasKey !== nextBackgroundAtlasKey) {
+          if (backgroundAtlas) {
+            backgroundAtlas.dispose();
+          }
+          backgroundAtlas = makeGlyphAtlas(
+            BACKGROUND_GLYPHS,
+            activeFontSet.background,
+            104,
+          );
+          backgroundAtlasKey = nextBackgroundAtlasKey;
+        }
+        return backgroundAtlas;
+      }
+
       if (backgroundAtlas) {
         backgroundAtlas.dispose();
         backgroundAtlas = null;
+        backgroundAtlasKey = "";
       }
+
+      if (!backgroundFallbackTexture) {
+        const pixel = new Uint8Array([255, 255, 255, 255]);
+        backgroundFallbackTexture = new THREE.DataTexture(pixel, 1, 1);
+        backgroundFallbackTexture.needsUpdate = true;
+      }
+      return backgroundFallbackTexture;
     }
 
     function fitCamera() {
@@ -336,7 +883,7 @@ export default function TypographyMeshHero({
 
       const targetWord = normalizeWord(text);
       let fontSize = Math.min(viewportWidth * 0.34, viewportHeight * 0.58);
-      context.font = `${fontSize}px "Geist Pixel Square"`;
+      context.font = `${fontSize}px ${activeFontSet.solid}`;
       const maxWidth = viewportWidth * 0.9;
       const measured = context.measureText(targetWord).width;
       if (measured > maxWidth) {
@@ -348,7 +895,7 @@ export default function TypographyMeshHero({
       context.fillStyle = "#fff";
       context.textAlign = "center";
       context.textBaseline = "middle";
-      context.font = `${solidFontSize}px "Geist Pixel Square"`;
+      context.font = `${solidFontSize}px ${activeFontSet.solid}`;
       context.fillText(targetWord, mask.width * 0.5, mask.height * 0.5);
 
       const chars = targetWord.split("");
@@ -424,43 +971,67 @@ export default function TypographyMeshHero({
 
     function buildBackgroundMeshes() {
       disposeBackgroundLayers();
-
-      backgroundAtlas = makeGlyphAtlas(BACKGROUND_GLYPHS, "Geist Pixel Line", 104);
-
       const minEdge = Math.min(viewportWidth, viewportHeight);
-      const baseStep = Math.max(8, Math.min(14, Math.round(minEdge / 86)));
-      const layerConfigs = [
-        {
-          depth: -560,
-          density: 0.72,
-          parallax: 0.045,
-          alphaMul: 0.34,
-          chaosBias: 0.08,
-          driftScale: 0.6,
-          rotScale: 0.65,
-          sizeScale: 1.18,
-        },
-        {
-          depth: -430,
-          density: 0.9,
-          parallax: 0.08,
-          alphaMul: 0.5,
-          chaosBias: 0.15,
-          driftScale: 0.85,
-          rotScale: 0.9,
-          sizeScale: 1.0,
-        },
-        {
-          depth: -310,
-          density: 1.05,
-          parallax: 0.12,
-          alphaMul: 0.72,
-          chaosBias: 0.24,
-          driftScale: 1.12,
-          rotScale: 1.18,
-          sizeScale: 0.88,
-        },
-      ];
+      const isLettersStyle = activeBackgroundMeshStyle === "letters";
+      const backgroundSamplerTexture = getBackgroundSamplerTexture(activeBackgroundMeshStyle);
+      const baseStep = isLettersStyle
+        ? Math.max(8, Math.min(14, Math.round(minEdge / 86)))
+        : Math.max(14, Math.min(22, Math.round(minEdge / 64)));
+      const layerConfigs = isLettersStyle
+        ? [
+            {
+              depth: -560,
+              density: 0.72,
+              parallax: 0.045,
+              alphaMul: 0.34,
+              chaosBias: 0.08,
+              driftScale: 0.6,
+              rotScale: 0.65,
+              sizeScale: 1.18,
+            },
+            {
+              depth: -430,
+              density: 0.9,
+              parallax: 0.08,
+              alphaMul: 0.5,
+              chaosBias: 0.15,
+              driftScale: 0.85,
+              rotScale: 0.9,
+              sizeScale: 1.0,
+            },
+            {
+              depth: -310,
+              density: 1.05,
+              parallax: 0.12,
+              alphaMul: 0.72,
+              chaosBias: 0.24,
+              driftScale: 1.12,
+              rotScale: 1.18,
+              sizeScale: 0.88,
+            },
+          ]
+        : [
+            {
+              depth: -480,
+              density: 0.62,
+              parallax: 0.055,
+              alphaMul: 0.5,
+              chaosBias: 0.12,
+              driftScale: 0.72,
+              rotScale: 0.72,
+              sizeScale: 1.42,
+            },
+            {
+              depth: -340,
+              density: 0.78,
+              parallax: 0.095,
+              alphaMul: 0.74,
+              chaosBias: 0.2,
+              driftScale: 0.98,
+              rotScale: 0.94,
+              sizeScale: 1.18,
+            },
+          ];
 
       for (const config of layerConfigs) {
         const step = Math.max(
@@ -508,7 +1079,7 @@ export default function TypographyMeshHero({
           transparent: true,
           depthWrite: false,
           uniforms: {
-            uAtlas: { value: backgroundAtlas },
+            uAtlas: { value: backgroundSamplerTexture },
             uGlyphCount: { value: BACKGROUND_GLYPHS.length },
             uTime: { value: 0 },
             uAlpha: { value: 1 },
@@ -522,6 +1093,12 @@ export default function TypographyMeshHero({
             uPointerWarp: { value: 0 },
             uDrift: { value: new THREE.Vector2(0, 0) },
             uMode: { value: interactionModeRef.current },
+            uViewport: { value: new THREE.Vector2(viewportWidth, viewportHeight) },
+            uStyle: { value: 0 },
+            uFxAmount: { value: 0.58 },
+            uDotShape: { value: 0 },
+            uDotDensity: { value: 0.58 },
+            uGrainShape: { value: 0 },
           },
           vertexShader: `
             attribute vec2 aBase;
@@ -546,6 +1123,8 @@ export default function TypographyMeshHero({
             varying float vGlyph;
             varying float vTone;
             varying float vPulse;
+            varying vec2 vWorld;
+            varying float vSeed;
 
             void main() {
               float stream = sin(uTime * (0.24 + uChaos * 0.25) + aSeed * 6.2831) * (4.0 + uChaos * 6.0);
@@ -591,7 +1170,7 @@ export default function TypographyMeshHero({
                 pressureScale = 0.09;
                 dragScale = 0.048 + 0.03 * organic;
                 fieldScale = 0.07 + 0.05 * organic;
-              } else {
+              } else if (uMode < 2.5) {
                 flow = vec2(
                   sin(p.y * 0.01 + uTime * 0.83 + aSeed * 4.2) + cos((p.x + p.y) * 0.007 + uTime * 0.26),
                   sin(p.x * 0.009 - uTime * 0.79 + aSeed * 3.1) + cos((p.x - p.y) * 0.006 - uTime * 0.22)
@@ -599,6 +1178,35 @@ export default function TypographyMeshHero({
                 pressureScale = 0.19;
                 dragScale = 0.05 + 0.02 * organic;
                 fieldScale = 0.04 + 0.02 * organic;
+              } else if (uMode < 3.5) {
+                vec2 orbit = normalize(vec2(-delta.y, delta.x) + vec2(0.0003, 0.0002));
+                float spiral = sin(dist * 0.028 - uTime * 1.18 + aSeed * 6.0);
+                vec2 curl = vec2(
+                  cos((p.x + p.y) * 0.01 + uTime * 0.67),
+                  sin((p.y - p.x) * 0.011 - uTime * 0.61)
+                );
+                flow = orbit * (0.75 + 0.3 * organic) + curl * 0.5 + dir * spiral * 0.35;
+                pressureScale = 0.24;
+                dragScale = 0.038 + 0.022 * organic;
+                fieldScale = 0.1 + 0.05 * organic;
+              } else if (uMode < 4.5) {
+                float wave = sin(dist * 0.04 - uTime * 1.55 + aSeed * 7.3);
+                vec2 radial = dir * wave;
+                vec2 cross = vec2(-dir.y, dir.x) * (0.3 + 0.25 * organic);
+                flow = radial + cross;
+                pressureScale = 0.12;
+                dragScale = 0.07 + 0.03 * organic;
+                fieldScale = 0.085 + 0.03 * organic;
+              } else {
+                vec2 pull = -dir;
+                vec2 jitter = vec2(
+                  sin((p.y + aSeed * 130.0) * 0.02 + uTime * 0.92),
+                  cos((p.x - aSeed * 95.0) * 0.019 - uTime * 0.86)
+                );
+                flow = pull * (0.85 + 0.25 * organic) + jitter * 0.45;
+                pressureScale = -0.11;
+                dragScale = 0.09 + 0.035 * organic;
+                fieldScale = 0.07 + 0.025 * organic;
               }
 
               flow = normalize(flow + vec2(0.0001, 0.0002));
@@ -611,6 +1219,8 @@ export default function TypographyMeshHero({
               vGlyph = aGlyph;
               vTone = aTone;
               vPulse = 0.45 + 0.55 * sin(uTime * (0.38 + uChaos * 0.3) + aSeed * 10.0);
+              vWorld = p;
+              vSeed = aSeed;
 
               vec3 world = vec3(position.xy * aSize + p, uLayerDepth);
               gl_Position = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
@@ -620,19 +1230,172 @@ export default function TypographyMeshHero({
             uniform sampler2D uAtlas;
             uniform float uGlyphCount;
             uniform float uAlpha;
+            uniform vec2 uViewport;
+            uniform float uTime;
+            uniform float uStyle;
+            uniform float uFxAmount;
+            uniform float uDotShape;
+            uniform float uDotDensity;
+            uniform float uGrainShape;
 
             varying vec2 vUv;
             varying float vGlyph;
             varying float vTone;
             varying float vPulse;
+            varying vec2 vWorld;
+            varying float vSeed;
+
+            float hash(vec2 p) {
+              return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+            }
+
+            float noise(vec2 p) {
+              vec2 i = floor(p);
+              vec2 f = fract(p);
+              float a = hash(i);
+              float b = hash(i + vec2(1.0, 0.0));
+              float c = hash(i + vec2(0.0, 1.0));
+              float d = hash(i + vec2(1.0, 1.0));
+              vec2 u = f * f * (3.0 - 2.0 * f);
+              return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+            }
+
+            float fbm(vec2 p) {
+              float value = 0.0;
+              float amp = 0.5;
+              for (int i = 0; i < 4; i++) {
+                value += amp * noise(p);
+                p = p * 2.03 + vec2(17.13, 9.41);
+                amp *= 0.52;
+              }
+              return value;
+            }
+
+            mat2 rot(float a) {
+              float c = cos(a);
+              float s = sin(a);
+              return mat2(c, -s, s, c);
+            }
+
+            float dotShapeMask(vec2 p, float shape) {
+              vec2 q = p;
+              if (shape < 0.5) {
+                float d = length(q);
+                return 1.0 - smoothstep(0.36, 0.42, d);
+              }
+              if (shape < 1.5) {
+                q = abs(q);
+                float d = q.x + q.y;
+                return 1.0 - smoothstep(0.43, 0.5, d);
+              }
+              if (shape < 2.5) {
+                q = abs(q);
+                float d = max(q.x, q.y);
+                return 1.0 - smoothstep(0.36, 0.42, d);
+              }
+              q.y += 0.12;
+              float d = max(abs(q.x) * 1.15 + q.y * 0.9, -q.y);
+              return 1.0 - smoothstep(0.34, 0.42, d);
+            }
+
+            vec2 grainWarp(vec2 uv, float shape, float t, float amt) {
+              vec2 p = uv;
+              if (shape < 0.5) {
+                vec2 c = abs(p);
+                p += sign(uv) * pow(c, vec2(1.9)) * (0.26 + amt * 0.45);
+              } else if (shape < 1.5) {
+                p += vec2(
+                  sin(p.y * (3.5 + amt * 2.0) + t * 0.72),
+                  cos(p.x * (3.2 + amt * 2.2) - t * 0.63)
+                ) * (0.2 + 0.26 * amt);
+              } else if (shape < 2.5) {
+                vec2 grid = floor((p + 1.0) * (3.0 + amt * 4.0));
+                float j = hash(grid + vec2(1.9, -2.4));
+                p = fract((p + 1.0) * (3.0 + amt * 4.0)) - 0.5;
+                if (j > 0.5) {
+                  p.x *= -1.0;
+                }
+                p = p * rot(t * 0.15 + j * 3.1415);
+              } else if (shape < 3.5) {
+                vec2 d = p;
+                float l = length(d) + 0.0001;
+                p += normalize(d) * (0.24 + 0.38 * amt) * exp(-l * 2.6) * sin(t * 0.7 + l * 9.0);
+              } else if (shape < 4.5) {
+                float r = length(p);
+                p += vec2(
+                  sin(r * (10.0 + amt * 14.0) - t * 0.62),
+                  cos(r * (8.4 + amt * 12.0) + t * 0.55)
+                ) * (0.1 + 0.2 * amt);
+              } else if (shape < 5.5) {
+                vec2 d = p;
+                float l = length(d) + 0.0001;
+                p += normalize(d) * (0.18 + 0.38 * amt) * exp(-l * 1.9);
+              } else {
+                float r = length(p);
+                p = normalize(p + vec2(0.0001, -0.0001)) * pow(r, 1.2 + amt * 0.65);
+              }
+              return p;
+            }
+
+            float dotGridField(vec2 world) {
+              float cellSize = mix(22.0, 8.0, uDotDensity);
+              vec2 grid = world / max(2.0, cellSize);
+              vec2 cell = floor(grid);
+              vec2 local = fract(grid) - 0.5;
+              float jitter = hash(cell + vec2(vSeed * 19.3, -vSeed * 11.7));
+              local += vec2(
+                sin(uTime * 0.32 + jitter * 6.2831),
+                cos(uTime * 0.27 + jitter * 5.17)
+              ) * (0.05 + 0.11 * uFxAmount);
+              float dotMask = dotShapeMask(local * 2.0, uDotShape);
+              float pulse = 0.82 + 0.18 * sin(uTime * 0.54 + jitter * 6.2831 + vSeed * 7.0);
+              return dotMask * pulse;
+            }
+
+            float grainField(vec2 world) {
+              vec2 scale = max(uViewport, vec2(1.0));
+              vec2 uv = world / scale;
+              uv *= 2.7;
+              vec2 warped = grainWarp(uv, uGrainShape, uTime * 0.4, uFxAmount);
+              float nA = noise(warped * (4.4 + uFxAmount * 2.2) + vec2(uTime * 0.05, -uTime * 0.03));
+              float nB = noise(warped * (8.1 + uFxAmount * 3.1) - vec2(uTime * 0.08, uTime * 0.06));
+              float ridge = abs(sin((nA * 1.25 + nB * 0.92 + uv.x * 0.64 - uv.y * 0.48) * 6.2831));
+              return clamp(0.18 + nA * 0.52 + nB * 0.23 + ridge * 0.36, 0.0, 1.0);
+            }
 
             void main() {
-              float idx = floor(vGlyph + 0.5);
-              vec2 uv = vec2((vUv.x + idx) / uGlyphCount, vUv.y);
-              vec4 texel = texture2D(uAtlas, uv);
-              float alpha = texel.a * (0.12 + 0.2 * vPulse) * uAlpha;
+              if (uStyle < 0.5) {
+                float idx = floor(vGlyph + 0.5);
+                vec2 uv = vec2((vUv.x + idx) / uGlyphCount, vUv.y);
+                vec4 texel = texture2D(uAtlas, uv);
+                float alpha =
+                  texel.a * (0.12 + 0.2 * vPulse) * uAlpha * (0.3 + 0.7 * uFxAmount);
+                if (alpha < 0.004) discard;
+                float luminance = clamp(0.74 + 0.2 * vTone + vPulse * 0.1, 0.0, 1.0);
+                gl_FragColor = vec4(vec3(luminance), min(alpha, 1.0));
+                return;
+              }
+
+              if (uStyle < 1.5) {
+                float dotField = dotGridField(vWorld);
+                float dotCellMask = dotShapeMask((vUv - 0.5) * 2.0, uDotShape);
+                float alpha = dotCellMask * dotField * uAlpha * (0.08 + 0.92 * uFxAmount);
+                if (alpha < 0.004) discard;
+                float luminance = clamp(0.8 + dotField * 0.22, 0.0, 1.0);
+                gl_FragColor = vec4(vec3(luminance), min(alpha, 1.0));
+                return;
+              }
+
+              float grain = grainField(vWorld);
+              float edge =
+                smoothstep(0.0, 0.16, vUv.x) *
+                (1.0 - smoothstep(0.84, 1.0, vUv.x)) *
+                smoothstep(0.0, 0.16, vUv.y) *
+                (1.0 - smoothstep(0.84, 1.0, vUv.y));
+              float alpha = grain * edge * uAlpha * (0.06 + 0.9 * uFxAmount);
               if (alpha < 0.004) discard;
-              gl_FragColor = vec4(vec3(1.0), alpha);
+              float luminance = clamp(0.68 + grain * 0.32, 0.0, 1.0);
+              gl_FragColor = vec4(vec3(luminance), min(alpha, 1.0));
             }
           `,
         });
@@ -654,8 +1417,23 @@ export default function TypographyMeshHero({
     function buildForegroundMesh() {
       disposeForeground();
 
-      foregroundAtlas = makeGlyphAtlas(fgGlyphs, "Geist Pixel Line", 95);
-      foregroundSolidAtlas = makeGlyphAtlas(fgGlyphs, "Geist Pixel Square", 95);
+      const nextForegroundAtlasKey = `${fgGlyphs.join("")}|${activeFontSet.line}|95`;
+      if (!foregroundAtlas || foregroundAtlasKey !== nextForegroundAtlasKey) {
+        if (foregroundAtlas) {
+          foregroundAtlas.dispose();
+        }
+        foregroundAtlas = makeGlyphAtlas(fgGlyphs, activeFontSet.line, 95);
+        foregroundAtlasKey = nextForegroundAtlasKey;
+      }
+
+      const nextForegroundSolidAtlasKey = `${fgGlyphs.join("")}|${activeFontSet.solid}|95`;
+      if (!foregroundSolidAtlas || foregroundSolidAtlasKey !== nextForegroundSolidAtlasKey) {
+        if (foregroundSolidAtlas) {
+          foregroundSolidAtlas.dispose();
+        }
+        foregroundSolidAtlas = makeGlyphAtlas(fgGlyphs, activeFontSet.solid, 95);
+        foregroundSolidAtlasKey = nextForegroundSolidAtlasKey;
+      }
 
       const baseStep = Math.max(
         14,
@@ -864,17 +1642,22 @@ export default function TypographyMeshHero({
       buildForegroundMesh();
     }
 
+    function applyRenderScale() {
+      const pixelRatio = getRenderPixelRatio();
+      renderer.setPixelRatio(pixelRatio);
+      renderer.setSize(viewportWidth, viewportHeight, false);
+
+      if (composer && bloomPass) {
+        composer.setPixelRatio(pixelRatio);
+        composer.setSize(viewportWidth, viewportHeight);
+        bloomPass.setSize(viewportWidth, viewportHeight);
+      }
+    }
+
     function onResize() {
       viewportWidth = Math.max(320, window.innerWidth);
       viewportHeight = Math.max(240, window.innerHeight);
-
-      renderer.setPixelRatio(getRenderPixelRatio());
-      renderer.setSize(viewportWidth, viewportHeight, false);
-
-      composer.setPixelRatio(getRenderPixelRatio());
-      composer.setSize(viewportWidth, viewportHeight);
-      bloomPass.setSize(viewportWidth, viewportHeight);
-
+      applyRenderScale();
       rebuildScene();
     }
 
@@ -891,6 +1674,29 @@ export default function TypographyMeshHero({
       retargetExcite = 1;
     }
 
+    function applyFontSet(nextSet) {
+      const normalized = normalizeFontSet(nextSet);
+      if (
+        normalized.line === activeFontSet.line &&
+        normalized.solid === activeFontSet.solid &&
+        normalized.background === activeFontSet.background
+      ) {
+        return;
+      }
+
+      activeFontSet = normalized;
+      rebuildScene();
+      retargetMorph = 0;
+      retargetExcite = 1;
+    }
+
+    function applyBackgroundMeshFx(nextFx) {
+      const normalized = normalizeBackgroundMeshFx(nextFx);
+      if (normalized.style === activeBackgroundMeshStyle) return;
+      activeBackgroundMeshStyle = normalized.style;
+      onResize();
+    }
+
     function onPointerMove(event) {
       const nextX = (event.clientX / viewportWidth - 0.5) * 2;
       const nextY = (event.clientY / viewportHeight - 0.5) * 2;
@@ -901,12 +1707,38 @@ export default function TypographyMeshHero({
       pointerStrengthTarget = 1;
     }
 
-    function onPointerLeave() {
+    function resetPointerState(immediate = false) {
       pointerTargetX = 0;
       pointerTargetY = 0;
       pointerStrengthTarget = 0;
       pointerVelocityTargetX = 0;
       pointerVelocityTargetY = 0;
+      if (immediate) {
+        pointerX = 0;
+        pointerY = 0;
+        pointerStrength = 0;
+        pointerVelocityX = 0;
+        pointerVelocityY = 0;
+        pointerEnergy = 0;
+      }
+    }
+
+    function onPointerLeave() {
+      resetPointerState(true);
+    }
+
+    function onPointerCancel() {
+      resetPointerState(true);
+    }
+
+    function onWindowBlur() {
+      resetPointerState(true);
+    }
+
+    function onVisibilityChange() {
+      if (document.visibilityState === "hidden") {
+        resetPointerState(true);
+      }
     }
 
     function onKeyDown(event) {
@@ -920,16 +1752,14 @@ export default function TypographyMeshHero({
         return;
       }
 
-      if (event.key === "1" && onInteractionModeChange) {
-        onInteractionModeChange(INTERACTION_MODES[0].id);
-        return;
-      }
-      if (event.key === "2" && onInteractionModeChange) {
-        onInteractionModeChange(INTERACTION_MODES[1].id);
-        return;
-      }
-      if (event.key === "3" && onInteractionModeChange) {
-        onInteractionModeChange(INTERACTION_MODES[2].id);
+      const hotkeyIndex = Number.parseInt(event.key, 10) - 1;
+      if (
+        onInteractionModeChange &&
+        Number.isInteger(hotkeyIndex) &&
+        hotkeyIndex >= 0 &&
+        hotkeyIndex < INTERACTION_MODES.length
+      ) {
+        onInteractionModeChange(INTERACTION_MODES[hotkeyIndex].id);
         return;
       }
       if (event.key.toLowerCase() === "m" && onInteractionModeChange) {
@@ -969,7 +1799,7 @@ export default function TypographyMeshHero({
           qualityScale += Math.sign(targetQuality - qualityScale) * 0.08;
           qualityScale = Math.max(0.62, Math.min(1.05, qualityScale));
           qualityEvalAt = t + 3.2;
-          onResize();
+          applyRenderScale();
           animationFrame = window.requestAnimationFrame(animate);
           return;
         }
@@ -1063,6 +1893,8 @@ export default function TypographyMeshHero({
       const pointerWorldVelY = -pointerVelocityY * viewportHeight * 0.52;
 
       const modeIndex = interactionModeRef.current;
+      const modeId = INTERACTION_MODES[modeIndex]?.id ?? "fluid";
+      const modeStrength = modeStrengthsRef.current[modeId] ?? 1;
       const modeConfig =
         modeIndex === 1
           ? {
@@ -1090,30 +1922,80 @@ export default function TypographyMeshHero({
                 backgroundPointerStrengthFloat: 0.24,
                 backgroundSpeedBoost: 0.3,
               }
-            : {
-                pointerWarpRadiusFactor: 0.34,
-                pointerWarpBase: 0.66,
-                pointerWarpFloat: 0.32,
-                pointerFlowBase: 0.6,
-                pointerFlowFloat: 0.26,
-                backgroundPointerRadiusFactor: 0.42,
-                backgroundPointerWarpFactor: 0.36,
-                backgroundPointerStrengthBase: 0.18,
-                backgroundPointerStrengthFloat: 0.22,
-                backgroundSpeedBoost: 0.28,
-              };
+            : modeIndex === 3
+              ? {
+                  pointerWarpRadiusFactor: 0.54,
+                  pointerWarpBase: 1.06,
+                  pointerWarpFloat: 0.42,
+                  pointerFlowBase: 0.84,
+                  pointerFlowFloat: 0.34,
+                  backgroundPointerRadiusFactor: 0.62,
+                  backgroundPointerWarpFactor: 0.44,
+                  backgroundPointerStrengthBase: 0.25,
+                  backgroundPointerStrengthFloat: 0.3,
+                  backgroundSpeedBoost: 0.44,
+                }
+              : modeIndex === 4
+                ? {
+                    pointerWarpRadiusFactor: 0.6,
+                    pointerWarpBase: 0.7,
+                    pointerWarpFloat: 0.26,
+                    pointerFlowBase: 0.78,
+                    pointerFlowFloat: 0.28,
+                    backgroundPointerRadiusFactor: 0.66,
+                    backgroundPointerWarpFactor: 0.31,
+                    backgroundPointerStrengthBase: 0.21,
+                    backgroundPointerStrengthFloat: 0.22,
+                    backgroundSpeedBoost: 0.36,
+                  }
+                : modeIndex === 5
+                  ? {
+                      pointerWarpRadiusFactor: 0.38,
+                      pointerWarpBase: 1.08,
+                      pointerWarpFloat: 0.36,
+                      pointerFlowBase: 0.26,
+                      pointerFlowFloat: 0.16,
+                      backgroundPointerRadiusFactor: 0.43,
+                      backgroundPointerWarpFactor: 0.46,
+                      backgroundPointerStrengthBase: 0.24,
+                      backgroundPointerStrengthFloat: 0.26,
+                      backgroundSpeedBoost: 0.35,
+                    }
+                  : {
+                      pointerWarpRadiusFactor: 0.34,
+                      pointerWarpBase: 0.66,
+                      pointerWarpFloat: 0.32,
+                      pointerFlowBase: 0.6,
+                      pointerFlowFloat: 0.26,
+                      backgroundPointerRadiusFactor: 0.42,
+                      backgroundPointerWarpFactor: 0.36,
+                      backgroundPointerStrengthBase: 0.18,
+                      backgroundPointerStrengthFloat: 0.22,
+                      backgroundSpeedBoost: 0.28,
+                    };
 
       const pointerWarpRadius =
         Math.min(viewportWidth, viewportHeight) * modeConfig.pointerWarpRadiusFactor;
       const pointerWarpStrength =
         foregroundStep *
         (modeConfig.pointerWarpBase + modeConfig.pointerWarpFloat * floatingMix) *
-        motion.flow;
+        motion.flow *
+        modeStrength;
       const pointerFlowStrength =
         foregroundStep *
         (modeConfig.pointerFlowBase + modeConfig.pointerFlowFloat * floatingMix) *
         motion.flow *
-        (0.84 + 0.24 * motion.drag);
+        (0.84 + 0.24 * motion.drag) *
+        modeStrength;
+      const backgroundMeshFx = backgroundMeshFxRef.current;
+      const backgroundMeshStyle =
+        backgroundMeshFx.style === "dotgrid"
+          ? 1
+          : backgroundMeshFx.style === "grain"
+            ? 2
+            : 0;
+      const backgroundDotShape = getPaperDotShapeIndex(backgroundMeshFx.dotShape);
+      const backgroundGrainShape = getPaperGrainShapeIndex(backgroundMeshFx.grainShape);
 
       for (const layer of backgroundLayers) {
         layer.material.uniforms.uTime.value = t;
@@ -1131,17 +2013,27 @@ export default function TypographyMeshHero({
           (modeConfig.backgroundPointerStrengthBase +
             modeConfig.backgroundPointerStrengthFloat * floatingMix) *
           layer.alphaMul *
-          (0.82 + modeConfig.backgroundSpeedBoost * pointerSpeed);
+          (0.82 + modeConfig.backgroundSpeedBoost * pointerSpeed) *
+          modeStrength;
         layer.material.uniforms.uPointerRadius.value =
           Math.min(viewportWidth, viewportHeight) *
           modeConfig.backgroundPointerRadiusFactor;
         layer.material.uniforms.uPointerWarp.value =
-          foregroundStep * modeConfig.backgroundPointerWarpFactor * motion.flow;
+          foregroundStep *
+          modeConfig.backgroundPointerWarpFactor *
+          motion.flow *
+          modeStrength;
         layer.material.uniforms.uDrift.value.set(
           ambientDriftX * floatingMix * layer.driftScale,
           ambientDriftY * floatingMix * layer.driftScale,
         );
         layer.material.uniforms.uMode.value = modeIndex;
+        layer.material.uniforms.uViewport.value.set(viewportWidth, viewportHeight);
+        layer.material.uniforms.uStyle.value = backgroundMeshStyle;
+        layer.material.uniforms.uFxAmount.value = backgroundMeshFx.amount;
+        layer.material.uniforms.uDotShape.value = backgroundDotShape;
+        layer.material.uniforms.uDotDensity.value = backgroundMeshFx.dotDensity;
+        layer.material.uniforms.uGrainShape.value = backgroundGrainShape;
 
         layer.mesh.position.x = -pointerOffsetX * layer.parallax;
         layer.mesh.position.y = -pointerOffsetY * layer.parallax;
@@ -1271,6 +2163,48 @@ export default function TypographyMeshHero({
               pressureScale = 0.2;
               dragScale = (0.08 + 0.05 * organicPulse) * motion.drag;
               flowScale = (0.32 + 0.2 * organicPulse) * motion.flow;
+            } else if (modeIndex === 3) {
+              const orbitA = -dy / dist;
+              const orbitB = dx / dist;
+              const spiral = Math.sin(dist * 0.03 - t * 1.2 + seed * 7.4);
+              const curlA =
+                Math.cos((targetX + targetY) * 0.012 + t * 0.72 + seed * 4.1) * 0.62;
+              const curlB =
+                Math.sin((targetY - targetX) * 0.013 - t * 0.67 + seed * 3.6) * 0.62;
+              flowA =
+                orbitA * (0.9 + 0.3 * organicPulse) +
+                (dx / dist) * spiral * 0.35 +
+                curlA;
+              flowB =
+                orbitB * (0.9 + 0.3 * organicPulse) +
+                (dy / dist) * spiral * 0.35 +
+                curlB;
+              pressureScale = 0.26;
+              dragScale = (0.09 + 0.05 * organicPulse) * motion.drag;
+              flowScale = (0.74 + 0.34 * organicPulse) * motion.flow;
+            } else if (modeIndex === 4) {
+              const wave = Math.sin(dist * 0.044 - t * 1.52 + seed * 5.2);
+              const radialA = (dx / dist) * wave;
+              const radialB = (dy / dist) * wave;
+              const crossA = (-dy / dist) * (0.34 + 0.2 * organicPulse);
+              const crossB = (dx / dist) * (0.34 + 0.2 * organicPulse);
+              flowA = radialA + crossA;
+              flowB = radialB + crossB;
+              pressureScale = 0.12;
+              dragScale = (0.11 + 0.05 * organicPulse) * motion.drag;
+              flowScale = (0.62 + 0.24 * organicPulse) * motion.flow;
+            } else if (modeIndex === 5) {
+              const pullA = -dx / dist;
+              const pullB = -dy / dist;
+              const latticeA =
+                Math.sin(targetY * 0.021 + t * 0.86 + seed * 6.6) * 0.52;
+              const latticeB =
+                Math.cos(targetX * 0.022 - t * 0.82 + seed * 5.7) * 0.52;
+              flowA = pullA * (0.92 + 0.26 * organicPulse) + latticeA;
+              flowB = pullB * (0.92 + 0.26 * organicPulse) + latticeB;
+              pressureScale = -0.16;
+              dragScale = (0.14 + 0.05 * organicPulse) * motion.drag;
+              flowScale = (0.28 + 0.14 * organicPulse) * motion.flow;
             } else {
               flowA =
                 Math.sin(targetY * 0.016 + t * 0.58 + seed * 6.7) +
@@ -1326,7 +2260,6 @@ export default function TypographyMeshHero({
         }
 
         foregroundOffsetAttribute.needsUpdate = true;
-        foregroundDepthAttribute.needsUpdate = true;
         foregroundGlyphAttribute.needsUpdate = true;
       }
 
@@ -1344,20 +2277,43 @@ export default function TypographyMeshHero({
 
       camera.lookAt(0, 0, 0);
 
-      bloomPass.strength = 0.14 + 0.16 * motion.camera + 0.06 * floatingMix;
-      bloomPass.radius = 0.34 + 0.12 * (1 - floatingMix);
-      bloomPass.threshold = 0.92;
+      if (bloomPass && filmPass) {
+        bloomPass.strength = 0.14 + 0.16 * motion.camera + 0.06 * floatingMix;
+        bloomPass.radius = 0.34 + 0.12 * (1 - floatingMix);
+        bloomPass.threshold = 0.92;
 
-      filmPass.material.uniforms.uTime.value = t;
-      filmPass.material.uniforms.uNoise.value = 0.012 + 0.012 * (1 - solidifyMix);
-      filmPass.material.uniforms.uVignette.value = 0.22 + 0.16 * motion.camera;
+        filmPass.material.uniforms.uTime.value = t;
+        filmPass.material.uniforms.uNoise.value = 0.012 + 0.012 * (1 - solidifyMix);
+        filmPass.material.uniforms.uVignette.value = 0.22 + 0.16 * motion.camera;
+      }
+
+      if (paperPass) {
+        const paper = paperFxRef.current;
+        paperPass.material.uniforms.uTime.value = t;
+        paperPass.material.uniforms.uIntensity.value = paper.enabled
+          ? paper.intensity
+          : 0;
+        paperPass.material.uniforms.uPalette.value = getPaperPaletteIndex(paper.palette);
+        paperPass.material.uniforms.uEffect.value = getPaperEffectIndex(paper.effect);
+        paperPass.material.uniforms.uEffectAmount.value = paper.amount;
+        paperPass.material.uniforms.uSpeed.value = paper.speed;
+        paperPass.material.uniforms.uPointer.value.set(
+          (pointerX + 1) * 0.5,
+          (1 - pointerY) * 0.5,
+        );
+        paperPass.material.uniforms.uEnergy.value = Math.min(1, pointerEnergy);
+      }
 
       if (perfRef.current && t > hudUpdateAt) {
         perfRef.current.textContent = `${Math.round(fpsEma)} FPS · Q${qualityScale.toFixed(2)} · ${currentWord}`;
         hudUpdateAt = t + 0.35;
       }
 
-      composer.render();
+      if (composer) {
+        composer.render();
+      } else {
+        renderer.render(scene, camera);
+      }
       animationFrame = window.requestAnimationFrame(animate);
     }
 
@@ -1370,33 +2326,91 @@ export default function TypographyMeshHero({
       } catch {
         // Ignore font load failures; fallback fonts still allow rendering.
       }
+      if (disposed) return;
+
+      try {
+        const {
+          EffectComposer,
+          RenderPass,
+          UnrealBloomPass,
+          ShaderPass,
+        } = await loadPostprocessingModules();
+        if (disposed) return;
+
+        const nextComposer = new EffectComposer(renderer);
+        const renderPass = new RenderPass(scene, camera);
+        const nextBloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.24, 0.45, 0.92);
+        const nextPaperPass = new ShaderPass(PAPER_MESH_SHADER);
+        const nextFilmPass = new ShaderPass(FILM_GRAIN_SHADER);
+        nextComposer.addPass(renderPass);
+        nextComposer.addPass(nextBloomPass);
+        nextComposer.addPass(nextPaperPass);
+        nextComposer.addPass(nextFilmPass);
+
+        if (disposed) {
+          nextComposer.dispose();
+          return;
+        }
+
+        composer = nextComposer;
+        bloomPass = nextBloomPass;
+        paperPass = nextPaperPass;
+        filmPass = nextFilmPass;
+      } catch {
+        // Fallback to direct renderer if postprocessing chunk fails.
+      }
+      if (disposed) return;
 
       onResize();
+      applyFontSetRef.current = applyFontSet;
+      applyBackgroundMeshFxRef.current = applyBackgroundMeshFx;
       retargetWordRef.current = retargetWord;
       clock.start();
       animate();
     }
 
-    window.addEventListener("resize", onResize);
-    window.addEventListener("pointermove", onPointerMove);
+    function onResizeEvent() {
+      if (resizeFrame !== 0) return;
+      resizeFrame = window.requestAnimationFrame(() => {
+        resizeFrame = 0;
+        onResize();
+      });
+    }
+
+    window.addEventListener("resize", onResizeEvent);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
     window.addEventListener("pointerleave", onPointerLeave);
+    window.addEventListener("pointercancel", onPointerCancel, { passive: true });
+    window.addEventListener("blur", onWindowBlur);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("keydown", onKeyDown);
     boot();
 
     return () => {
       disposed = true;
+      applyFontSetRef.current = null;
+      applyBackgroundMeshFxRef.current = null;
       retargetWordRef.current = null;
 
       window.cancelAnimationFrame(animationFrame);
-      window.removeEventListener("resize", onResize);
+      if (resizeFrame !== 0) {
+        window.cancelAnimationFrame(resizeFrame);
+      }
+      window.removeEventListener("resize", onResizeEvent);
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerleave", onPointerLeave);
+      window.removeEventListener("pointercancel", onPointerCancel);
+      window.removeEventListener("blur", onWindowBlur);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("keydown", onKeyDown);
 
-      disposeForeground();
-      disposeBackgroundLayers();
+      disposeForeground(true);
+      disposeBackgroundLayers(true);
 
-      composer.dispose();
+      if (composer) {
+        composer.dispose();
+      }
+      clock.stop();
       renderer.dispose();
     };
   }, []);
@@ -1422,9 +2436,13 @@ export default function TypographyMeshHero({
       <div className="hud">
         <p>Letter Mesh Background + Typographic Foreground</p>
         <p className="meta">
-          {interactionMode.toUpperCase()} MODE · {colorMode.toUpperCase()} COLOR · {motionPreset.toUpperCase()} PRESET · React / Three.js / Geist Pixel · Press M/C · <span className="perf" ref={perfRef}>60 FPS</span>
+          {interactionMode.toUpperCase()} MODE · {colorMode.toUpperCase()} COLOR · {motionPreset.toUpperCase()} PRESET · {fontLabel.toUpperCase()} · React / Three.js · Press 1-6/M/C · <span className="perf" ref={perfRef}>60 FPS</span>
         </p>
       </div>
     </section>
   );
 }
+
+TypographyMeshHero.displayName = "TypographyMeshHero";
+
+export default memo(TypographyMeshHero, areHeroPropsEqual);
